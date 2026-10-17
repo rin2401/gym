@@ -1,6 +1,7 @@
 /* The admin routes, driven with fake server helpers — the layer between the card and the
  * config store, which learned per-provider keys, a base URL, a model list and the "this
  * provider spawns nothing" report. The user routes are exercised through jobs.test.js. */
+import './pinned-clock.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
