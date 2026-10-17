@@ -1,3 +1,4 @@
+import './pinned-clock.mjs';
 /* What bounds the Coach's spend, pinned against the real queue and the fixture provider.
  *
  * Forget keeps today's per-profile count. The instance count is reserved at enqueue and is

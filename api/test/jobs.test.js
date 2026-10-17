@@ -1,3 +1,4 @@
+import './pinned-clock.mjs';
 /* End-to-end through the real queue and a real child process — the only fake is the provider
    itself. Every outcome the user can be shown is reachable here without an AI account, which
    is the whole reason the fixture CLI exists.

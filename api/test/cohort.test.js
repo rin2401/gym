@@ -1,3 +1,4 @@
+import './pinned-clock.mjs';
 /* "Compare with others": medians across the profiles that opted in, gated on a minimum
  * headcount, computed from the state files on disk. */
 import test from 'node:test';
