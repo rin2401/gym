@@ -14,6 +14,11 @@
     "bindings": [{ "name": "DB", "class_name": "Db" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Db"] }],
+  // User-uploaded photos/videos (workers/src/media.js). Uncomment once R2 is enabled on the
+  // account (Cloudflare Dashboard → R2 → Enable, needs payment info) and the bucket exists
+  // (`npx wrangler r2 bucket create gym-media`); until then the media routes stay absent and
+  // the client knows the feature is off. Nothing here is a secret either.
+  // "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "gym-media" }],
   // The same variables the docker deployment reads (api/server.js). RP_ID must be the
   // hostname the site is served from — passkeys are bound to it — and ORIGIN its full
   // URL. Override per environment with `wrangler deploy --var RP_ID:...` or a config

@@ -13,11 +13,12 @@
  *   challenges/pairings   kv table with an expiry        (survive DO eviction, unlike the
  *                                                        Node process's in-memory Maps)
  *
- * Not ported (yet): media uploads (R2), the password routes (scrypt needs the paid
- * plan's CPU), push, the rest of the admin dashboard. The Coach IS here (workers/src/coach/):
- * configured through the admin dashboard, jobs on the plain-HTTPS adapters, scheduled
- * reviews on the alarm. Passkey sign-in, pairing, the sync protocol and the Coach — the
- * heart of the app — are here in full.
+ * Not ported: the password routes (scrypt needs the paid plan's CPU — passkey, Google
+ * sign-in or nothing), and media uploads until an R2 binding is added (the code is here
+ * in media.js; the account has to enable R2 first). The Coach (coach/), the admin
+ * dashboard (admin.js), web push (push.js) and the reminder/nudge/cadence alarm are all
+ * here. Passkey sign-in, pairing, the sync protocol, the Coach, push and the dashboard —
+ * effectively the whole app — run in this one object.
  */
 import crypto from 'node:crypto';
 import { DurableObject } from 'cloudflare:workers';
@@ -37,6 +38,9 @@ import { Coach } from './coach/store.js';
 import * as coachJobs from './coach/jobs.js';
 import { coachRoutes } from './coach/routes.js';
 import { tick as coachTick } from './coach/cadence.js';
+import { adminRoutes } from './admin.js';
+import { pushRoutes, reminderTick } from './push.js';
+import { createMediaStore, mediaRoutes, mediaConfig } from './media.js';
 
 const MINUTE = 60000;
 const MAX_BODY = 5 * 1024 * 1024;
@@ -108,25 +112,49 @@ export class Db extends DurableObject {
     // here, the same as the Node server's recoverOnBoot.
     this.coach = new Coach({
       sql: this.sql, env: this.env, secret,
-      readState: uid => { const S = this.readStateStrict(uid); return S === UNREADABLE ? null : S; },
+      readState: uid => this.stateOf(uid),
       listUserIds: () => this.sql.exec(`SELECT key FROM docs WHERE key LIKE 'state:%'`).toArray().map(r => r.key.slice(6)),
       waitUntil: p => this.ctx.waitUntil(p)
     });
     coachJobs.recoverStale(this.coach);
-    Object.assign(this.routes, coachRoutes(this));
+    // Media on R2: inert while no MEDIA binding exists (see media.js). The upload budget is
+    // the same per-profile hourly window the Node server's mediaThrottle keeps.
+    this.media = this.env.MEDIA ? createMediaStore({
+      bucket: this.env.MEDIA, sql: this.sql, env: this.env,
+      readState: uid => this.stateOf(uid)
+    }) : null;
+    this.mediaWindow = createWindow({ max: (this.media?.limits.uploadsPerHour) || 600, windowMs: 3600000 });
+    // Rest timers live on the instance (in-memory, per device — see push.js).
+    this.restTimers = new Map();
+    Object.assign(this.routes, coachRoutes(this), adminRoutes(this), pushRoutes(this),
+      ...(this.media ? [mediaRoutes(this)] : []));
     // The cadence tick (a 60 s setInterval on the Node server) is the DO alarm: set if none
     // is pending, and re-armed from alarm() after every tick.
     if (await this.ctx.storage.getAlarm() == null) await this.ctx.storage.setAlarm(Date.now() + 60000);
   }
 
-  /* The cadence tick: scheduled Coach reviews for every profile whose cadence came due.
-   *  Everything else about the alarm is in coach/cadence.js; this only re-arms it. */
+  /* The cadence tick: scheduled Coach reviews for every profile whose cadence came due,
+   *  plus the reminder/nudge pass (push.js) — one alarm, both ticks, re-armed after each. */
   async alarm() {
     await this.ready;
     try { await coachTick(this.coach, this.db.users); }
     catch (e) { console.error('coach cadence tick', e); }
+    try { await reminderTick(this); }
+    catch (e) { console.error('reminder tick', e); }
     try { await this.ctx.storage.setAlarm(Date.now() + 60000); } catch { /* object shutting down */ }
   }
+
+  get VAPID_SUBJECT() {
+    return this.env.VAPID_SUBJECT || (this.SECURE ? this.ORIGIN : 'mailto:admin@localhost');
+  }
+  // A state document as every module outside this file wants it: parsed, or null when there
+  // is none or it cannot be parsed (readStateStrict's UNREADABLE stays this file's own).
+  stateOf(uid) {
+    const S = this.readStateStrict(uid);
+    return S === UNREADABLE ? null : S;
+  }
+  // The body reader as the route modules take it (the module-scope readBody, on the instance).
+  readBody(request) { return readBody(request); }
   parseDb(text) {
     const v = JSON.parse(text);
     if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('db document is not an object');
@@ -314,7 +342,14 @@ export class Db extends DurableObject {
     await this.ready;
     let url;
     try { url = new URL(request.url); } catch { return json(400, { error: 'bad request' }); }
-    const key = request.method + ' ' + url.pathname;
+    let key = request.method + ' ' + url.pathname;
+    // The one dynamic path in the route table: a media blob is addressed by its hash
+    // (api/server.js does the same rewrite). The hash rides on the request for the handler.
+    const mm = /^\/api\/media\/([0-9a-f]{64})$/.exec(url.pathname);
+    if (mm && (request.method === 'PUT' || request.method === 'GET')) {
+      key = request.method + ' /api/media/{hash}';
+      request.mediaHash = mm[1];
+    }
     const handler = this.routes[key];
     if (!handler) return json(404, { error: 'not found' });
     if (!this.csrfOk(request, key)) {
@@ -355,10 +390,12 @@ export class Db extends DurableObject {
         invite_only: this.INVITE_ONLY,
         allow_guest: this.ALLOW_GUEST,
         ...(lang && /^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})?$/.test(lang) ? { default_lang: lang } : {}),
-        // No media, no password login on this deployment — the blocks stay absent, which is
-        // how the client knows those features do not exist here. The Coach block is whatever
-        // the admin dashboard configured (null until it is switched on and connected);
-        // Google sign-in is the one extra this deployment has over the Node server.
+        // No password login on this deployment — the block stays absent, which is how the
+        // client knows the feature does not exist here. The Coach block is whatever the admin
+        // dashboard configured (null until it is switched on and connected); media is
+        // whatever the R2 binding offers; Google sign-in is the one extra this deployment
+        // has over the Node server.
+        ...((this.media && this.media.limits.enabled) ? { media: mediaConfig(this.media.limits) } : {}),
         ...(this.GOOGLE ? { google_login: true } : {}),
         ...(this.readSession(request) ? { coach: await this.coach.publicConfig() } : {})
       });
@@ -702,6 +739,9 @@ export class Db extends DurableObject {
       try { text = JSON.stringify(body.state); }
       catch (e) { if (e instanceof RangeError) return json(400, { error: 'invalid state' }); throw e; }
       this.putState(user.id, body.state);
+      // Media GC bookkeeping rides the same write: which blobs the new state still names
+      // (see media.js noteState — a push that drops a ref starts that blob's grace period).
+      if (this.media) { try { await this.media.noteState(user.id, body.state); } catch (e) { console.error('media noteState', e); } }
       return json(200, { ok: true, ts: body.state._ts || null, rev: curRev + 1, wid: body.state._wid });
     },
 

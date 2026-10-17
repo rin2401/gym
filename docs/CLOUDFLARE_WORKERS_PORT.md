@@ -94,6 +94,26 @@ so there is no session table to port.
   ~50 routes) ports to a fetch-handler router; `json()`, cookie reading, body
   parsing get small Workers equivalents. Route logic itself is I/O-agnostic.
 
+- Push notifications (`web-push` on the Node server) — implemented on WebCrypto instead
+  (`push.js`): RFC 8292 VAPID (ES256 JWT, instance keypair in the kv table) and
+  RFC 8291 aes128gcm payload encryption, neither of which the `web-push` package can
+  do on workerd. The reminder/nudge tick rides the same DO alarm as the Coach cadence.
+- The admin dashboard (`admin.js`): users list with presence, per-user drill-down,
+  disable/delete, invites, and the audit log read out of the `audit` table.
+- Media uploads (`media.js`) — written against R2 (`uploads/<uid>/<hash>.<ext>`),
+  inert until an `r2_buckets` binding is uncommented in wrangler.jsonc (the account
+  has to enable R2 first). The whole sniffing/mvhd/reference-walk logic is copied
+  from `api/media.js`; the store is R2 + a docs-row gc mark instead of the
+  temp-file/`.gc.json` dance, which a transactional object store does not need.
+
+## What does NOT get ported
+
+- Password login. `password.js` runs scrypt N = 2^15 (~50–150 ms CPU) against the
+  Workers Free 10 ms CPU/request limit — passkey or Google sign-in is the whole
+  offer on a free deployment; turning passwords on means Workers Paid ($5/mo).
+- `warmup.js` (Coach): it exists to keep a *local* llama.cpp/Ollama prefix cache
+  warm, which is not this deployment's shape.
+
 ## Coach (ported — see `workers/src/coach/`)
 
 The AI Coach runs on this deployment, configured through the admin dashboard

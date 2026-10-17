@@ -295,6 +295,42 @@ async function main() {
   const cfg0 = await req('POST', '/api/admin/coach/config', { cookie, body: { enabled: false } });
   check(cfg0.status === 200, 'coach admin: switched back off', cfg0);
 
+  /* ---------- admin dashboard + push (workers/src/admin.js, push.js) ---------- */
+
+  const au = await req('GET', '/api/admin/users', { cookie });
+  check(au.status === 200 && Array.isArray(au.json.users) && au.json.users.some(u => u.admin)
+    && au.json.users.every(u => typeof u.workouts === 'number' && (u.live === null || typeof u.live === 'object')),
+  'admin: users list with counts + presence', au);
+
+  const aa = await req('GET', '/api/admin/audit?limit=10', { cookie });
+  check(aa.status === 200 && Array.isArray(aa.json.events) && aa.json.events.length > 0
+    && aa.json.events.every(e => e.id != null && e.ev), 'admin: audit reads back', aa);
+
+  const inv = await req('POST', '/api/admin/invites/new', { cookie, body: { note: 'smoke' } });
+  check(inv.status === 200 && /^[0-9A-F]{16}$/.test(inv.json.invite.code), 'admin: invite minted', inv);
+  const invList = await req('GET', '/api/admin/invites', { cookie });
+  check(invList.status === 200 && invList.json.invites.some(i => i.code === inv.json.invite.code), 'admin: invite listed', invList);
+  const invRevoke = await req('POST', '/api/admin/invites/revoke', { cookie, body: { code: inv.json.invite.code } });
+  check(invRevoke.status === 200, 'admin: invite revoked', invRevoke);
+
+  // Push: the VAPID key exists and is a P-256 raw point; a test send with no subscription is a no-op ok.
+  const pk = await req('GET', '/api/push/public-key');
+  check(pk.status === 200 && /^[A-Za-z0-9_-]{87}$/.test(pk.json.key), 'push: VAPID public key out', pk);
+  const ptest = await req('POST', '/api/push/test', { cookie, body: {} });
+  check(ptest.status === 200 && ptest.json.ok === true, 'push: test send is a clean no-op', ptest);
+  const rt = await req('POST', '/api/push/rest-timer', { cookie, body: { seconds: 1, deviceId: 'smoketest01' } });
+  check(rt.status === 200, 'push: rest timer scheduled', rt);
+  const rtc = await req('POST', '/api/push/rest-timer/cancel', { cookie, body: { deviceId: 'smoketest01' } });
+  check(rtc.status === 200, 'push: rest timer cancelled', rtc);
+  const pst = await req('GET', '/api/push/status?endpoint=' + encodeURIComponent('https://example.com/push/x'), { cookie });
+  check(pst.status === 200 && pst.json.subscribed === false, 'push: status says not subscribed', pst);
+
+  // Media: no R2 binding on this dev instance — the routes answer 404 and config says nothing,
+  // which is the contract a client from before the feature (or a server with it off) has.
+  const med = await req('POST', '/api/media/missing', { cookie, body: { hashes: [] } });
+  check(med.status === 404, 'media: absent without the R2 binding', med);
+  check(!('media' in confOn.json), 'media: config block absent', confOn.json);
+
   // The static frontend: the asset handler serves the built app on the same origin.
   const index = await fetch(API + '/');
   const html = await index.text();
