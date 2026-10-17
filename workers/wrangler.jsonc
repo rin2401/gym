@@ -2,7 +2,7 @@
   // Deploying the whole openGym stack as one Worker: the API routes live in a Durable
   // Object (src/db.js), the built frontend (../frontend/dist) is this Worker's static
   // assets, so the app keeps the single origin its passkeys and CSRF guard are built on.
-  "name": "opengym",
+  "name": "gym",
   "main": "src/worker.js",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -19,8 +19,8 @@
   // URL. Override per environment with `wrangler deploy --var RP_ID:...` or a config
   // per environment; nothing here is a secret.
   "vars": {
-    "RP_ID": "opengym.rin2401.workers.dev",
-    "ORIGIN": "https://opengym.rin2401.workers.dev",
+    "RP_ID": "gym.rin2401.workers.dev",
+    "ORIGIN": "https://gym.rin2401.workers.dev",
     "RP_NAME": "openGym",
     // Google sign-in (workers/src/db.js /api/auth/google). The client id is public; the
     // secret lives as a Worker secret (`wrangler secret put GOOGLE_CLIENT_SECRET`), not
