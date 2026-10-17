@@ -494,6 +494,35 @@ export const NUDGE_COPY = {
       ]
     }
   },
+  "vi": {
+    "friendly": {
+      "title": "Mọi thứ ổn chứ?",
+      "lines": [
+        "{0} vẫn đang chờ. Chuyện gì vậy?",
+        "Hôm nay không {0} à? Ngày mai chỉ cần một buổi ngắn cũng được tính.",
+        "Ngày khó khăn à? {0} để mai cũng được. Mai là khởi đầu mới.",
+        "Này, hôm nay {0} không diễn ra rồi. Mọi thứ ổn chứ?"
+      ]
+    },
+    "guilt": {
+      "title": "Tôi nhớ bạn",
+      "lines": [
+        "{0} đứng chờ ở cửa cả buổi tối. Vì bạn.",
+        "Thanh tạ hôm nay hỏi thăm bạn đấy. Tôi chẳng biết trả lời thế nào.",
+        "Có phải tôi nói gì sai không? {0} nhớ bạn lắm.",
+        "Tôi giữ sẵn cho bạn một chỗ trên ghế tập. Vẫn còn trống đấy."
+      ]
+    },
+    "drill": {
+      "title": "Chú ý, tân binh!",
+      "lines": [
+        "Cơ bắp của bạn đang xách vali đi đấy. Ngày mai {0}, không lý do nào được cả!",
+        "{0} không tự xong được đâu, tân binh. Nhanh lên!",
+        "Lý do không nâng nổi tạ đâu. Mai trình diện để {0} nhé!",
+        "Cơ bắp của bạn vừa nộp đơn báo mất tích. Hãy có mặt tập {0} nào!"
+      ]
+    }
+  },
   "zh": {
     "friendly": {
       "title": "一切还好吗？",
