@@ -14,8 +14,10 @@
  *                                                        Node process's in-memory Maps)
  *
  * Not ported (yet): media uploads (R2), the password routes (scrypt needs the paid
- * plan's CPU), push, the admin dashboard and the Coach. Passkey sign-in, pairing and
- * the sync protocol — the heart of the app — are here in full.
+ * plan's CPU), push, the rest of the admin dashboard. The Coach IS here (workers/src/coach/):
+ * configured through the admin dashboard, jobs on the plain-HTTPS adapters, scheduled
+ * reviews on the alarm. Passkey sign-in, pairing, the sync protocol and the Coach — the
+ * heart of the app — are here in full.
  */
 import crypto from 'node:crypto';
 import { DurableObject } from 'cloudflare:workers';
@@ -31,6 +33,10 @@ import {
   listPasskeys, addPasskeyRecord, renamePasskeyRecord, removePasskeyRecord,
   passkeyRemovalRefused, MAX_PASSKEYS
 } from './passkeys-store.js';
+import { Coach } from './coach/store.js';
+import * as coachJobs from './coach/jobs.js';
+import { coachRoutes } from './coach/routes.js';
+import { tick as coachTick } from './coach/cadence.js';
 
 const MINUTE = 60000;
 const MAX_BODY = 5 * 1024 * 1024;
@@ -96,6 +102,30 @@ export class Db extends DurableObject {
     const row = this.sql.exec(`SELECT value FROM docs WHERE key = 'db'`).toArray()[0];
     this.db = row ? this.parseDb(row.value) : { users: [], creds: [], subs: [], invites: [], deviceLinks: [] };
     this.auditSeq = this.sql.exec(`SELECT COALESCE(MAX(id), 0) AS n FROM audit`).toArray()[0]?.n || 0;
+    // The AI Coach (workers/src/coach/) — configured through the admin dashboard, its
+    // settings and per-user records in this same docs table, its scheduled reviews on the
+    // alarm below. A job that was running when the object was evicted gets the honest answer
+    // here, the same as the Node server's recoverOnBoot.
+    this.coach = new Coach({
+      sql: this.sql, env: this.env, secret,
+      readState: uid => { const S = this.readStateStrict(uid); return S === UNREADABLE ? null : S; },
+      listUserIds: () => this.sql.exec(`SELECT key FROM docs WHERE key LIKE 'state:%'`).toArray().map(r => r.key.slice(6)),
+      waitUntil: p => this.ctx.waitUntil(p)
+    });
+    coachJobs.recoverStale(this.coach);
+    Object.assign(this.routes, coachRoutes(this));
+    // The cadence tick (a 60 s setInterval on the Node server) is the DO alarm: set if none
+    // is pending, and re-armed from alarm() after every tick.
+    if (await this.ctx.storage.getAlarm() == null) await this.ctx.storage.setAlarm(Date.now() + 60000);
+  }
+
+  /* The cadence tick: scheduled Coach reviews for every profile whose cadence came due.
+   *  Everything else about the alarm is in coach/cadence.js; this only re-arms it. */
+  async alarm() {
+    await this.ready;
+    try { await coachTick(this.coach, this.db.users); }
+    catch (e) { console.error('coach cadence tick', e); }
+    try { await this.ctx.storage.setAlarm(Date.now() + 60000); } catch { /* object shutting down */ }
   }
   parseDb(text) {
     const v = JSON.parse(text);
@@ -325,11 +355,12 @@ export class Db extends DurableObject {
         invite_only: this.INVITE_ONLY,
         allow_guest: this.ALLOW_GUEST,
         ...(lang && /^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})?$/.test(lang) ? { default_lang: lang } : {}),
-        // No Coach, no media, no password login on this deployment — the blocks stay absent,
-        // which is how the client knows those features do not exist here. Google sign-in is
-        // the one extra this deployment has over the Node server.
+        // No media, no password login on this deployment — the blocks stay absent, which is
+        // how the client knows those features do not exist here. The Coach block is whatever
+        // the admin dashboard configured (null until it is switched on and connected);
+        // Google sign-in is the one extra this deployment has over the Node server.
         ...(this.GOOGLE ? { google_login: true } : {}),
-        ...(this.readSession(request) ? { coach: null } : {})
+        ...(this.readSession(request) ? { coach: await this.coach.publicConfig() } : {})
       });
     },
 

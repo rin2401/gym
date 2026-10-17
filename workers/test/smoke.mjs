@@ -4,6 +4,7 @@
  *
  *   health → config → register (options/verify) → me → data GET/PUT → conflict →
  *   login (options/verify) → pair create/redeem → logout
+ *   → passkeys/device-link → coach (admin card, consent gate, a job that fails classified)
  *
  * Run: npm test (from workers/). Exits non-zero on the first mismatch.
  */
@@ -11,6 +12,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import fs from 'node:fs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Against a deployed instance: SMOKE_API=https://… SMOKE_RP_ID=… SMOKE_ORIGIN=… npm test
@@ -92,11 +94,17 @@ function check(ok, msg, extra) {
 async function main() {
   let stop = () => {};
   if (!process.env.SMOKE_API) {
+    // A scratch state dir, wiped first: local dev state persists across runs, and the Coach
+    // half below needs the first profile THIS run to be the admin (FIRST_USER_ADMIN), which
+    // a leftover user from the last run would silently break.
+    const STATE = path.join(ROOT, '.wrangler', 'smoke-state');
+    fs.rmSync(STATE, { recursive: true, force: true });
     const wrangler = spawn('npx', [
-      'wrangler', 'dev', '--port', String(PORT), '--local',
+      'wrangler', 'dev', '--port', String(PORT), '--local', '--persist-to', STATE,
       // wrangler.jsonc carries the deployed RP_ID/ORIGIN; the local defaults above are what the
-      // ceremony here signs with, so they are overridden back for the local server.
-      '--var', `RP_ID:${RP_ID}`, '--var', `ORIGIN:${ORIGIN}`
+      // ceremony here signs with, so they are overridden back for the local server. The first
+      // profile registered below is the admin, which is what the Coach's admin half needs.
+      '--var', `RP_ID:${RP_ID}`, '--var', `ORIGIN:${ORIGIN}`, '--var', 'FIRST_USER_ADMIN:1'
     ], {
       cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
       // A process group of its own, so stopping the test kills npx, wrangler and workerd
@@ -231,6 +239,61 @@ async function main() {
   const lo4 = await req('POST', '/api/login/options', { body: {} });
   const lv4 = await req('POST', '/api/login/verify', { body: { cid: lo4.json.cid, credential: key3.assertion(lo4.json.options.challenge) } });
   check(lv4.status === 404, 'passkeys: the removed one no longer signs in', lv4);
+
+  /* ---------- AI Coach (workers/src/coach) ----------
+     The first profile is the admin here (FIRST_USER_ADMIN above). The feature starts off,
+     is switched on through the admin routes against an endpoint that is deliberately not
+     listening — so the whole job path (enqueue → payload → pipeline → provider call →
+     classified failure) runs for real without an AI account — and is switched off again. */
+
+  const confIn = await req('GET', '/api/config', { cookie });
+  check(confIn.status === 200 && confIn.json.coach === null, 'coach: config says null while off', confIn);
+
+  const st0 = await req('GET', '/api/coach/status', { cookie });
+  check(st0.status === 503 && st0.json.code === 'off', 'coach: status refuses while off', st0);
+
+  const adm = await req('GET', '/api/admin/coach', { cookie });
+  check(adm.status === 200 && adm.json.provider === 'compatible' && adm.json.enabled === false
+    && adm.json.providers.length === 4 && adm.json.auth.state === 'optional', 'coach admin: card shape', adm);
+
+  const cfg1 = await req('POST', '/api/admin/coach/config', { cookie, body: { enabled: true, baseUrl: 'http://127.0.0.1:9/v1' } });
+  check(cfg1.status === 200 && cfg1.json.ok === true, 'coach admin: enabled + baseUrl saved', cfg1);
+  const confOn = await req('GET', '/api/config', { cookie });
+  check(confOn.status === 200 && confOn.json.coach?.enabled === true && confOn.json.coach.provider === 'compatible', 'coach: config announces the Coach', confOn);
+
+  // Consent is enforced at enqueue, server-side: a profile that has not agreed gets 403.
+  const plan0 = await req('POST', '/api/coach/plan', { cookie, body: { intake: {}, lang: 'en' } });
+  check(plan0.status === 403 && plan0.json.code === 'consent', 'coach: plan refused without consent', plan0);
+
+  // Agree (the client writes consent into its own synced state), and the job runs: the dead
+  // endpoint is a classified provider failure like any other.
+  const d2 = await req('GET', '/api/data', { cookie });
+  const putC = await req('PUT', '/api/data', {
+    cookie,
+    body: { state: { ...state, coach: { consent: { agreedAt: new Date().toISOString() } }, _ts: Date.now() }, baseRev: d2.json.rev }
+  });
+  check(putC.status === 200, 'coach: consent synced', putC);
+
+  const plan1 = await req('POST', '/api/coach/plan', { cookie, body: { intake: {}, lang: 'en' } });
+  check(plan1.status === 202 && plan1.json.job?.id, 'coach: plan enqueued', plan1);
+
+  let done = null;
+  for (let i = 0; i < 30 && !done; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    const st = await req('GET', '/api/coach/status', { cookie });
+    if (st.status === 200 && !st.json.job && st.json.last) done = st.json;
+  }
+  check(!!done && done.last.outcome === 'failed' && done.last.errorClass === 'provider', 'coach: job ran and failed classified', done);
+
+  const forget = await req('POST', '/api/coach/forget', { cookie });
+  check(forget.status === 200 && forget.json.ok === true, 'coach: forget clears the record', forget);
+
+  const testRun = await req('POST', '/api/admin/coach/test', { cookie, body: {} });
+  check(testRun.status === 200 && testRun.json.ok === false, 'coach admin: test round-trip reports the dead endpoint', testRun);
+
+  // Off again, so a deployed instance this test points at is left as it was found.
+  const cfg0 = await req('POST', '/api/admin/coach/config', { cookie, body: { enabled: false } });
+  check(cfg0.status === 200, 'coach admin: switched back off', cfg0);
 
   // The static frontend: the asset handler serves the built app on the same origin.
   const index = await fetch(API + '/');

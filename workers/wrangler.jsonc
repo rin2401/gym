@@ -22,6 +22,9 @@
     "RP_ID": "gym.rin2401.workers.dev",
     "ORIGIN": "https://gym.rin2401.workers.dev",
     "RP_NAME": "openGym",
+    // The Coach's admin dashboard (Settings → Coach) is how this instance is configured —
+    // provider, base URL, key, model — so the owner's profile has to be the admin.
+    "ADMIN_UIDS": "mDxFsIUTmhLr5beb",
     // Google sign-in (workers/src/db.js /api/auth/google). The client id is public; the
     // secret lives as a Worker secret (`wrangler secret put GOOGLE_CLIENT_SECRET`), not
     // here, so this file stays safe to commit. The redirect URI registered in Google Cloud

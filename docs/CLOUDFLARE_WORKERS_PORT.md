@@ -94,6 +94,37 @@ so there is no session table to port.
   ~50 routes) ports to a fetch-handler router; `json()`, cookie reading, body
   parsing get small Workers equivalents. Route logic itself is I/O-agnostic.
 
+## Coach (ported — see `workers/src/coach/`)
+
+The AI Coach runs on this deployment, configured through the admin dashboard
+exactly as on the Node server (Settings → Coach: provider, base URL, key,
+model — nothing in env vars but the `COACH_DISABLED` kill switch and
+`ADMIN_UIDS`). What the port consists of:
+
+- `core/` is copied verbatim from `api/coach/core/` — it is Node-free by design
+  (the phone imports the same files for BYOK mode), so prompt assembly, payload,
+  the invoke→parse→validate→repair pipeline and the plan fingerprint are one
+  implementation across server, phone and Worker.
+- Only the plain-HTTPS providers exist here (`adapters.js`): no child process can
+  be spawned inside a Worker, so the claude/codex runtimes and the fixture CLI
+  are not offered. The default provider is `compatible` (OpenAI-compatible
+  endpoint) — the whole reason this port exists.
+- `store.js` — `coach.json` becomes a `docs` row, per-user records
+  (`coach:user:<uid>`) and per-profile credentials too; the credential blob is
+  AES-256-GCM via WebCrypto, HKDF-derived from the instance `secret` (node:crypto
+  cipher support on workerd is thinner than the Node path needs).
+- `jobs.js` — same queue/single-flight/caps/history shapes; a job runs under
+  `ctx.waitUntil` so the 202 that enqueued it does not wait for the provider. A
+  job that was running when the object was evicted is recovered lazily (the
+  status poll and the boot scan mark it failed `restart` — the honest answer
+  `recoverOnBoot` gives on the Node server).
+- `cadence.js` — the 60 s `setInterval` tick is the DO `alarm()`; the due-date
+  logic (weekly slot, every-N-workouts) is copied verbatim. `warmup.js` is not
+  ported: it exists to keep a *local* llama.cpp/Ollama prefix cache warm, which
+  is not this deployment's shape.
+- Push notifications for finished proposals are not ported (no web-push on this
+  deployment); the proposal is waiting on the Coach screen either way.
+
 ## Media on R2
 
 Same layout as today: `uploads/<uid>/<sha256>.<ext>`, named by content hash,
