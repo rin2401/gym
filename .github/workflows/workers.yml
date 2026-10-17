@@ -25,8 +25,9 @@ jobs:
           node-version: 22
       # wrangler.jsonc points the assets binding at ../frontend/dist, which a fresh
       # checkout does not have (it is build output). The smoke test only talks to
-      # /api/*, so a stub file is all the asset handler needs to exist.
-      - run: mkdir -p frontend/dist && echo stub > frontend/dist/index.html
+      # /api/* and then checks that / serves an HTML page with a root element, so a stub with
+      # that element is all the asset handler needs.
+      - run: mkdir -p frontend/dist && echo '<div id="root"></div>' > frontend/dist/index.html
       - run: npm ci
         working-directory: workers
       - run: npm test
