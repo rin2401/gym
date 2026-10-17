@@ -1,3 +1,4 @@
+import './pinned-clock.mjs';
 /* What a person typed is bounded before it reaches a prompt.
  *
  * The intake screen caps its text fields, but payload.build reads the profile from a POST body
