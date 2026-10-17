@@ -50,4 +50,4 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       # A read-only probe, deliberately NOT the smoke test: that one registers profiles,
       # and against the deployed instance it would leave a junk user behind on every deploy.
-      - run: curl -fsS https://opengym.rin2401.workers.dev/api/health && curl -fsS https://opengym.rin2401.workers.dev/api/config
+      - run: curl -fsS https://gym.rin2401.workers.dev/api/health && curl -fsS https://gym.rin2401.workers.dev/api/config
