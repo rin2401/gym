@@ -87,6 +87,10 @@ export default function Settings({ page = null, find = null, via = null }) {
   // Name-and-password sign-in, where the instance offers it (#118).
   const config = useStore(s => s.config)
   const pwOn = passwordOn(config)
+  // Google sign-in, where the instance offers it (workers/src/db.js /api/auth/google): a
+  // full-page hop, the same one the Login screen makes.
+  const googleOn = !!config?.google_login
+  const googleSignIn = () => { location.href = '/api/auth/google' }
   // What the app is showing, which for a profile that never picked a language is worked out on
   // this device rather than stored (#303).
   const lang = effectiveLang(S, config)
@@ -876,6 +880,7 @@ export default function Settings({ page = null, find = null, via = null }) {
           <Row icon="plusCircle" iconTint="var(--acc)" title={t('Create passkey profile')} subtitle={t('Keeps your data safe and separate per person.')} accessory="chevron" onClick={registerHere} />
           <Row icon="fingerprint" iconTint="var(--blue)" title={t('Sign in with passkey')} accessory="chevron" onClick={passkeySignIn} />
           {/* The Login screen offers both of these; a guest who skipped it had no way to either from here. */}
+          {googleOn && <Row icon="google" iconTint="var(--blue)" title={t('Sign in with Google')} accessory="chevron" onClick={googleSignIn} />}
           {pwOn && <Row icon="plusCircle" iconTint="var(--orange)" title={t('Create profile with a password')} accessory="chevron" onClick={openPasswordRegister} />}
           {pwOn && <Row icon="key" iconTint="var(--orange)" title={t('Sign in with password')} accessory="chevron" onClick={() => openPasswordSignIn()} />}
           <Row icon="qr" iconTint="var(--blue)" title={t('Use a code from your other device')} accessory="chevron" onClick={openDeviceLinkRedeem} />
@@ -884,6 +889,7 @@ export default function Settings({ page = null, find = null, via = null }) {
           {/* No passkeys in this browser (plain http on a LAN address, say): a password is the way in. */}
           <Row icon="plusCircle" iconTint="var(--acc)" title={t('Create new profile')} subtitle={t('Keeps your data safe and separate per person.')} accessory="chevron" onClick={openPasswordRegister} />
           <Row icon="key" iconTint="var(--orange)" title={t('Sign in with password')} accessory="chevron" onClick={() => openPasswordSignIn()} />
+          {googleOn && <Row icon="google" iconTint="var(--blue)" title={t('Sign in with Google')} accessory="chevron" onClick={googleSignIn} />}
           <KeptChangesRows />
         </> : <>
           <Row icon="lock" iconTint="var(--grey)" title={t('Passkeys not supported in this browser.')} />

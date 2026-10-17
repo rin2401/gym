@@ -296,6 +296,7 @@ export default {
   'Create passkey': 'Tạo passkey',
   'Your workouts. Your weights. Your profile.': 'Buổi tập của bạn. Khối lượng của bạn. Hồ sơ của bạn.',
   'Sign in with passkey': 'Đăng nhập bằng passkey',
+  'Sign in with Google': 'Đăng nhập bằng Google',
   'Create new profile': 'Tạo hồ sơ mới',
   'This browser doesn\'t do passkeys, but you can still use openGym locally on this device.': 'Trình duyệt này không hỗ trợ passkey, nhưng bạn vẫn dùng openGym cục bộ trên thiết bị này được.',
   "This browser doesn't support passkeys, and this instance requires an account. Try a browser or device with passkey support.": 'Trình duyệt này không hỗ trợ passkey, còn máy chủ này yêu cầu tài khoản. Hãy dùng trình duyệt hoặc thiết bị có hỗ trợ passkey.',
