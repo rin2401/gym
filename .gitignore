@@ -30,3 +30,5 @@ frontend/bundle-size.json
 
 # Local planning notes
 docs/superpowers/plans/
+creds.json
+.wrangler/
