@@ -103,6 +103,9 @@ const P = {
   moon: <path d="M19.4 14.2A7.8 7.8 0 0 1 9.8 4.6a8.2 8.2 0 1 0 9.6 9.6Z" />,
   sun: <><circle cx="12" cy="12" r="4.4" /><path d="M12 3.6v2M12 18.4v2M20.4 12h-2M5.6 12h-2M17.94 6.06l-1.42 1.42M7.48 16.52l-1.42 1.42M17.94 17.94l-1.42-1.42M7.48 7.48 6.06 6.06" /></>,
   key: <><circle cx="8.2" cy="15.8" r="3.8" /><path d="m10.9 13.1 8-8M16.6 7.4l2 2M14.6 9.4l2 2" /></>,
+  // The Google "G", the one mark the brand allows for sign-in buttons. Fixed fills, not
+  // currentColor — the four-colour G is the recognizable thing on a login screen.
+  google: <><path fill="#4285F4" stroke="none" d="M21.6 12.2c0-.7-.06-1.4-.2-2H12v3.8h5.4a4.6 4.6 0 0 1-2 3v2.5h3.3c1.9-1.8 2.9-4.4 2.9-7.3Z" /><path fill="#34A853" stroke="none" d="M12 22c2.7 0 5-.9 6.7-2.5l-3.3-2.5c-.9.6-2 .9-3.4.9a6 6 0 0 1-5.6-4.1H3.1v2.7A10 10 0 0 0 12 22Z" /><path fill="#FBBC05" stroke="none" d="M6.4 13.8a6 6 0 0 1 0-3.7V7.4H3.1a10 10 0 0 0 0 9.1l3.3-2.7Z" /><path fill="#EA4335" stroke="none" d="M12 5.9c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3.1 7.4l3.3 2.7A6 6 0 0 1 12 5.9Z" /></>,
   lock: <><rect x="5" y="10.4" width="14" height="10" rx="2.8" /><path d="M8.4 10.4V7.8a3.6 3.6 0 0 1 7.2 0v2.6" /></>,
   envelope: <><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" /><path d="m4.5 7 7.5 6 7.5-6" /></>,
   // the connection to the server (components/SyncBanner.jsx): there, and not there

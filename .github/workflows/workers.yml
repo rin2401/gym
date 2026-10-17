@@ -1,0 +1,34 @@
+# The Workers port's own CI: the smoke test (workers/test/smoke.mjs) boots `wrangler dev`
+# locally and walks the whole passkey + sync + pairing flow against it. Upstream's
+# test.yml covers frontend/ and api/; this one covers workers/ only.
+name: Workers
+
+on:
+  pull_request:
+    paths:
+      - 'workers/**'
+      - '.github/workflows/workers.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'workers/**'
+      - '.github/workflows/workers.yml'
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # wrangler.jsonc points the assets binding at ../frontend/dist, which a fresh
+      # checkout does not have (it is build output). The smoke test only talks to
+      # /api/* and then checks that / serves an HTML page with a root element, so a stub with
+      # that element is all the asset handler needs.
+      - run: mkdir -p frontend/dist && echo '<div id="root"></div>' > frontend/dist/index.html
+      - run: npm ci
+        working-directory: workers
+      - run: npm test
+        working-directory: workers

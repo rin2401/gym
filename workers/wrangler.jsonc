@@ -1,0 +1,31 @@
+{
+  // Deploying the whole openGym stack as one Worker: the API routes live in a Durable
+  // Object (src/db.js), the built frontend (../frontend/dist) is this Worker's static
+  // assets, so the app keeps the single origin its passkeys and CSRF guard are built on.
+  "name": "gym",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../frontend/dist",
+    "binding": "ASSETS"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "DB", "class_name": "Db" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Db"] }],
+  // The same variables the docker deployment reads (api/server.js). RP_ID must be the
+  // hostname the site is served from — passkeys are bound to it — and ORIGIN its full
+  // URL. Override per environment with `wrangler deploy --var RP_ID:...` or a config
+  // per environment; nothing here is a secret.
+  "vars": {
+    "RP_ID": "gym.rin2401.workers.dev",
+    "ORIGIN": "https://gym.rin2401.workers.dev",
+    "RP_NAME": "openGym",
+    // Google sign-in (workers/src/db.js /api/auth/google). The client id is public; the
+    // secret lives as a Worker secret (`wrangler secret put GOOGLE_CLIENT_SECRET`), not
+    // here, so this file stays safe to commit. The redirect URI registered in Google Cloud
+    // Console must be ORIGIN + /api/auth/google/callback.
+    "GOOGLE_CLIENT_ID": "8089151908-abrk45ug6u2d70uvvqo3a2ckrrprd7fg.apps.googleusercontent.com"
+  }
+}
