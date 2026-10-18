@@ -360,6 +360,20 @@ async function main() {
   const html = await index.text();
   check(index.status === 200 && /<div id="root">|<script/.test(html), 'static: index.html served at /', { status: index.status });
 
+  /* The catalogue media (exercise stills/clips) are staged into dist by
+     scripts/catalogue/stage-media.mjs — a rebuild of frontend/ wipes them, and the next
+     deploy then DELETES them off the Worker, because assets sync to whatever is locally
+     present (that is exactly how they went missing once). A real build (dist/assets
+     exists) must carry them and serve them; the CI stub dist (index.html only) skips. */
+  const dist = path.join(ROOT, '..', 'frontend', 'dist');
+  if (fs.existsSync(path.join(dist, 'assets'))) {
+    check(fs.existsSync(path.join(dist, 'exercise-media', 'still', '0001.webp')),
+      'static: catalogue media staged into dist (npm run build wipes it — run scripts/catalogue/stage-media.mjs frontend/dist)');
+    const st = await fetch(API + '/exercise-media/still/0001.webp');
+    check(st.status === 200 && st.headers.get('content-type') === 'image/webp',
+      'static: catalogue stills served', { status: st.status, type: st.headers.get('content-type') });
+  }
+
   console.log('\nall green');
   stop();
 }
