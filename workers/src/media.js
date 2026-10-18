@@ -1,11 +1,14 @@
-/* Photos, GIFs and videos of a person's own exercises on the Worker — the R2 port of
- * api/media.js.
+/* Photos, GIFs and videos of a person's own exercises on the Worker — the port of
+ * api/media.js to an object store: a Workers KV namespace today (this account has no
+ * payment info on file, so R2's enable gate is out; KV's free tier — 1 GB, egress free —
+ * covers a household), an R2 bucket unchanged tomorrow if one is ever bound (see
+ * kvObjectStore for the adapter that makes the two interchangeable).
  *
  * Same promises (never decodes media beyond magic numbers and the mvhd box; never deletes
  * because something is missing; the directory — here the prefix — is the access check).
  * What differs:
  *
- *   - the bytes live in an R2 bucket under uploads/<uid>/<sha256>.<ext>, not DATA_DIR/uploads;
+ *   - the bytes live under uploads/<uid>/<sha256>.<ext> in the object store, not DATA_DIR/uploads;
  *     a put is atomic, so the temp-file dance and cleanTmp() have no counterpart;
  *   - an upload is read into memory (capped at the kind's limit, 40 MB worst case — well
  *     under the 128 MB a Worker may hold) and hashed with WebCrypto, instead of streamed
@@ -17,7 +20,8 @@
  *
  * The whole module is inert while no MEDIA binding exists (see db.js): the routes answer
  * 404 and /api/config says nothing, which is how the client knows the feature is off —
- * the same contract a Node server with MEDIA_UPLOADS=0 has.
+ * the same contract a Node server with MEDIA_UPLOADS=0 has. The one KV-specific clamp:
+ * a value is capped at 25 MB, so db.js caps the video limit at 20 MB.
  */
 const MB = 1024 * 1024;          // every *_MB setting means MiB; the client uses the same unit
 const HOUR = 3600000;
@@ -273,13 +277,45 @@ export function referencedHashes(state) {
   return out;
 }
 
-/* ---------------------------------------------------------------- the store (R2) */
+/* ---------------------------------------------------------------- the store (R2 / KV) */
+
+/** A KV namespace dressed as the object store createMediaStore expects — the same three
+ *  operations (list-by-prefix, put, get) plus delete, which is all the store uses, so an R2
+ *  binding and a KV namespace are interchangeable. What the adapter papers over:
+ *  KV's list returns keys + metadata instead of objects with sizes (the size rides in the
+ *  value's metadata at put time), get returns an ArrayBuffer instead of a stream, and
+ *  delete takes one key at a time. */
+export function kvObjectStore(kv) {
+  return {
+    async list({ prefix, cursor }) {
+      const page = await kv.list({ prefix, cursor });
+      return {
+        objects: page.keys.map(k => ({ name: k.name, size: k.metadata?.size ?? 0 })),
+        truncated: !page.list_complete,
+        cursor: page.list_complete ? undefined : page.cursor
+      };
+    },
+    async put(key, data) {
+      // The size rides in the metadata so the store's entry cache can be built from list
+      // alone — the same place an R2 list gets it from.
+      await kv.put(key, data, { metadata: { size: data.byteLength } });
+    },
+    async get(key) {
+      const buf = await kv.get(key, 'arrayBuffer');
+      return buf ? { body: buf } : null;
+    },
+    async delete(keys) {
+      for (const k of Array.isArray(keys) ? keys : [keys]) await kv.delete(k);
+    }
+  };
+}
 
 const round1 = n => Math.round(n * 10) / 10;
 const b64u = buf => Buffer.from(buf).toString('base64url');
 
 /**
- * The per-instance media store on R2. `bucket` is the MEDIA binding; `sql` the DO's SQLite
+ * The per-instance media store. `bucket` is the MEDIA binding dressed as an object store
+ * (an R2 binding as-is, or a KV namespace through kvObjectStore); `sql` the DO's SQLite
  * (the gc marks are a docs row); `readState(uid)` the profile's stored state, or null.
  */
 export function createMediaStore({ bucket, sql, limits, env, readState = () => null, now = Date.now, log = console } = {}) {
@@ -499,7 +535,7 @@ export function createMediaStore({ bucket, sql, limits, env, readState = () => n
       }
       const damaged = e.hashes.get(hash);
       if (damaged && damaged.ext !== sn.ext) await bucket.delete(objKey(e.id, hash, damaged.ext));
-      await bucket.put(objKey(e.id, hash, sn.ext), buf, { httpMetadata: { contentType: sn.mime } });
+      await bucket.put(objKey(e.id, hash, sn.ext), buf, { httpMetadata: { contentType: sn.mime } });   // httpMetadata is R2's; the KV adapter ignores it
       e.hashes.set(hash, { ext: sn.ext, size: buf.length });
       e.bytes += buf.length;
       e.count++;
@@ -527,6 +563,11 @@ export function createMediaStore({ bucket, sql, limits, env, readState = () => n
       const f = e.hashes.get(hash);
       if (!f) return null;
       return { key: objKey(e.id, hash, f.ext), ext: f.ext, mime: EXT_MIME[f.ext], size: f.size };
+    },
+    /** The bytes of a stored object (whatever the bucket is), or null. */
+    async get(f) {
+      const obj = await bucket.get(f.key);
+      return obj ? obj.body : null;
     },
     receive,
     async missing(uid, hashes) {
@@ -572,7 +613,8 @@ export function mediaRoutes(db) {
       const user = db.readSession(request);
       if (!user) return json(401, { error: 'not signed in' });
       // The hourly budget: the same shape the Node server's mediaThrottle has, per profile.
-      if (!db.mediaWindow.take('up:' + user.id)) return json(429, { error: 'too many uploads, try again later', code: 'locked' });
+      const wait = db.mediaWindow.take('up:' + user.id);
+      if (wait) return json(429, { error: 'too many uploads, try again later', code: 'locked', retryAfter: wait }, [['Retry-After', String(wait)]]);
       try {
         const r = await M().receive(user.id, request.mediaHash, request);
         return json(r.status, r.body);
@@ -587,10 +629,10 @@ export function mediaRoutes(db) {
       if (!user) return json(401, { error: 'not signed in' });
       const f = await M().file(user.id, request.mediaHash);
       if (!f) return json(404, { error: 'no such file', code: 'media-missing' });
-      const obj = await db.env.MEDIA.get(f.key);
-      if (!obj) return json(404, { error: 'no such file', code: 'media-missing' });
+      const body = await M().get(f);
+      if (body == null) return json(404, { error: 'no such file', code: 'media-missing' });
       // Hash-named and immutable: the one place a long private cache is honest.
-      return new Response(obj.body, {
+      return new Response(body, {
         status: 200,
         headers: [
           ['Content-Type', f.mime],

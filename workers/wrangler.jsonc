@@ -14,11 +14,12 @@
     "bindings": [{ "name": "DB", "class_name": "Db" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Db"] }],
-  // User-uploaded photos/videos (workers/src/media.js). Uncomment once R2 is enabled on the
-  // account (Cloudflare Dashboard → R2 → Enable, needs payment info) and the bucket exists
-  // (`npx wrangler r2 bucket create gym-media`); until then the media routes stay absent and
-  // the client knows the feature is off. Nothing here is a secret either.
-  // "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "gym-media" }],
+  // User-uploaded photos/videos (workers/src/media.js) — on Workers KV, not R2: the account
+  // has no payment info on file and KV's free tier (1 GB, egress free) covers a household with
+  // no card. The one tradeoff is KV's 25 MB value cap, so the video limit is clamped to 20 MB
+  // in db.js. If R2 is ever enabled, the store takes an R2 binding unchanged (same three
+  // operations) and the clamp can go.
+  "kv_namespaces": [{ "binding": "MEDIA", "id": "922cdf4f4f5e4a86b1e97b4b9741f9c8" }],
   // The same variables the docker deployment reads (api/server.js). RP_ID must be the
   // hostname the site is served from — passkeys are bound to it — and ORIGIN its full
   // URL. Override per environment with `wrangler deploy --var RP_ID:...` or a config

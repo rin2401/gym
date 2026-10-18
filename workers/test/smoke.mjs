@@ -325,11 +325,35 @@ async function main() {
   const pst = await req('GET', '/api/push/status?endpoint=' + encodeURIComponent('https://example.com/push/x'), { cookie });
   check(pst.status === 200 && pst.json.subscribed === false, 'push: status says not subscribed', pst);
 
-  // Media: no R2 binding on this dev instance — the routes answer 404 and config says nothing,
-  // which is the contract a client from before the feature (or a server with it off) has.
-  const med = await req('POST', '/api/media/missing', { cookie, body: { hashes: [] } });
-  check(med.status === 404, 'media: absent without the R2 binding', med);
-  check(!('media' in confOn.json), 'media: config block absent', confOn.json);
+  // Media on KV: a real round-trip. A 1×1 PNG (valid magic numbers, hash-named) goes up,
+  // reads back byte-identical, and the sync protocol's "missing" question then knows it.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  const pngHash = crypto.createHash('sha256').update(png).digest('hex');
+  const mediaUp = await fetch(API + '/api/media/' + pngHash, {
+    method: 'PUT', headers: { 'Content-Type': 'image/png', Cookie: cookie }, body: png
+  });
+  const mediaUpJ = await mediaUp.json().catch(() => ({}));
+  check(mediaUp.status === 201 && mediaUpJ.ok === true && mediaUpJ.existed === false && mediaUpJ.mime === 'image/png',
+    'media: upload stored (201, sniffed as png)', { status: mediaUp.status, body: mediaUpJ });
+
+  const down = await fetch(API + '/api/media/' + pngHash, { headers: { Cookie: cookie } });
+  const downBytes = Buffer.from(await down.arrayBuffer());
+  check(down.status === 200 && downBytes.equals(png) && down.headers.get('content-type') === 'image/png',
+    'media: reads back byte-identical', { status: down.status, type: down.headers.get('content-type') });
+
+  const miss = await req('POST', '/api/media/missing', { cookie, body: { hashes: [pngHash] } });
+  check(miss.status === 200 && miss.json.missing.length === 0 && miss.json.usage.count === 1,
+    'media: sync knows it is not missing', miss);
+
+  // The same bytes again: an upload of what the profile already has is a 200 existed, not a re-store.
+  const mediaUp2 = await fetch(API + '/api/media/' + pngHash, {
+    method: 'PUT', headers: { 'Content-Type': 'image/png', Cookie: cookie }, body: png
+  });
+  const mediaUp2J = await mediaUp2.json().catch(() => ({}));
+  check(mediaUp2.status === 200 && mediaUp2J.existed === true, 'media: re-upload is a 200 existed', { status: mediaUp2.status, body: mediaUp2J });
+
+  check(!!confOn.json.media && confOn.json.media.videoMB === 20,
+    'media: config block out, video clamped to 20MB (KV value cap)', confOn.json.media);
 
   // The static frontend: the asset handler serves the built app on the same origin.
   const index = await fetch(API + '/');

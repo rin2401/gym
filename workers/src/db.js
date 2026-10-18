@@ -14,11 +14,11 @@
  *                                                        Node process's in-memory Maps)
  *
  * Not ported: the password routes (scrypt needs the paid plan's CPU — passkey, Google
- * sign-in or nothing), and media uploads until an R2 binding is added (the code is here
- * in media.js; the account has to enable R2 first). The Coach (coach/), the admin
+ * sign-in or nothing). Media uploads run on Workers KV (media.js — the store takes an
+ * R2 binding unchanged if the account ever enables it). The Coach (coach/), the admin
  * dashboard (admin.js), web push (push.js) and the reminder/nudge/cadence alarm are all
- * here. Passkey sign-in, pairing, the sync protocol, the Coach, push and the dashboard —
- * effectively the whole app — run in this one object.
+ * here. Passkey sign-in, pairing, the sync protocol, the Coach, push, media and the
+ * dashboard — effectively the whole app — run in this one object.
  */
 import crypto from 'node:crypto';
 import { DurableObject } from 'cloudflare:workers';
@@ -40,7 +40,7 @@ import { coachRoutes } from './coach/routes.js';
 import { tick as coachTick } from './coach/cadence.js';
 import { adminRoutes } from './admin.js';
 import { pushRoutes, reminderTick } from './push.js';
-import { createMediaStore, mediaRoutes, mediaConfig } from './media.js';
+import { createMediaStore, mediaRoutes, mediaConfig, mediaLimits, kvObjectStore } from './media.js';
 
 const MINUTE = 60000;
 const MAX_BODY = 5 * 1024 * 1024;
@@ -117,12 +117,17 @@ export class Db extends DurableObject {
       waitUntil: p => this.ctx.waitUntil(p)
     });
     coachJobs.recoverStale(this.coach);
-    // Media on R2: inert while no MEDIA binding exists (see media.js). The upload budget is
-    // the same per-profile hourly window the Node server's mediaThrottle keeps.
-    this.media = this.env.MEDIA ? createMediaStore({
-      bucket: this.env.MEDIA, sql: this.sql, env: this.env,
-      readState: uid => this.stateOf(uid)
-    }) : null;
+    // Media on KV (this account has no payment info, so R2 is out — see media.js for the
+    // adapter that makes a KV namespace and an R2 bucket interchangeable). The one clamp:
+    // a KV value is capped at 25 MB, so the video limit is 20 MB here, whatever the env says.
+    if (this.env.MEDIA) {
+      const L = mediaLimits(this.env);
+      const limits = { ...L, videoMB: Math.min(L.videoMB, 20) };
+      this.media = createMediaStore({
+        bucket: kvObjectStore(this.env.MEDIA), sql: this.sql, env: this.env, limits,
+        readState: uid => this.stateOf(uid)
+      });
+    } else this.media = null;
     this.mediaWindow = createWindow({ max: (this.media?.limits.uploadsPerHour) || 600, windowMs: 3600000 });
     // Rest timers live on the instance (in-memory, per device — see push.js).
     this.restTimers = new Map();
