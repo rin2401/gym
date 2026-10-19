@@ -26,6 +26,25 @@ export const anthropicSpec = {
     messages: [{ role: 'user', content: prompt }]
   }),
   errorMessage: data => data && data.error && data.error.message,
+  // Streamed answers (see http.js): Anthropic's SSE events are typed — only the text deltas
+  // carry answer bytes, message_delta carries the stop reason, and an error event is the
+  // provider giving up mid-stream. Everything else (message_start, content_block_start…) is
+  // bookkeeping and yields nothing.
+  canStream: true,
+  readDelta: data => {
+    if (data.type === 'content_block_delta') {
+      const d = data.delta || {};
+      return d.type === 'text_delta' && typeof d.text === 'string' ? { text: d.text } : {};
+    }
+    if (data.type === 'message_delta') {
+      const reason = data.delta && data.delta.stop_reason;
+      if (reason === 'max_tokens') return { truncated: true };
+      if (reason === 'refusal') return { error: 'the model declined this request' };
+      return {};
+    }
+    if (data.type === 'error') return { error: (data.error && data.error.message) || 'the stream errored' };
+    return {};
+  },
   readText: data => {
     if (data.stop_reason === 'refusal') return { error: 'the model declined this request' + (data.stop_details && data.stop_details.explanation ? ': ' + data.stop_details.explanation : '') };
     const text = (data.content || []).filter(b => b && b.type === 'text').map(b => b.text).join('');

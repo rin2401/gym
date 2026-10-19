@@ -17,6 +17,14 @@
  *   fetch threw / aborted    → code 1 with the host / timedOut
  *   no key and one required  → spawnError                             "missing", like an absent CLI
  *
+ * Answers arrive as a stream when the spec speaks SSE (`canStream`): a long generation is
+ * minutes of nothing on the wire without it, and a proxy in front of the endpoint — Cloudflare's
+ * 100 s, most nginx defaults — decides the origin is gone and 524s the job. Streamed chunks keep
+ * bytes flowing, so the same generation survives the proxy; the deltas are joined back into the
+ * one `text` the parser always read. A server that ignores the `stream` flag and answers in a
+ * single JSON body is still handled — the content type says which of the two happened — and one
+ * that rejects the flag outright (400 naming "stream") is asked once more without it.
+ *
  * A provider is described by a spec (see anthropic.js etc.); this file owns the transport.
  */
 import { HTTP_PROVIDERS, baseUrlFor, extraHeadersFor } from '../providers.js';
@@ -36,8 +44,8 @@ const sleep = (ms, signal) => new Promise(resolve => {
 
 const hostOf = url => { try { return new URL(url).host; } catch { return url; } };
 // What the admin card's Runtime line names: the scheme the endpoint is actually called with. An
-// OpenAI-compatible model on the LAN is usually plain http://, and calling that "HTTPS" told the
-// owner the traffic was encrypted when it was not.
+// OpenAI-compatible model on the LAN is usually plain http://, and calling that "HTTPS" told
+// the owner the traffic was encrypted when it was not.
 const schemeOf = url => { try { return new URL(url).protocol === 'http:' ? 'HTTP' : 'HTTPS'; } catch { return 'HTTPS'; } };
 const trim = (s, n = 300) => String(s == null ? '' : s).slice(0, n);
 
@@ -67,19 +75,26 @@ function candidateUrls(spec, base, path) {
 }
 
 /** `send(url)` with the fallback above. When the other form fails as well, the first answer is
- *  the one returned, so Ollama's "model not found" 404 still reaches the person unchanged. */
+ * the one returned, so Ollama's "model not found" 404 still reaches the person unchanged.
+ * `send` answers `{ res, stop }` — `stop` disarms that request's timeout once its body has been
+ * consumed (see `call`). */
 async function reach(spec, base, path, send) {
   const urls = candidateUrls(spec, base, path);
   const first = await send(urls[0]);
-  if (first.status !== 404 || urls.length < 2) return first;
+  if (first.res.status !== 404 || urls.length < 2) return first;
   const second = await send(urls[1]);
-  if (!second.ok) { try { await second.text(); } catch { /* drained or gone */ } return first; }
+  if (!second.res.ok) { try { await second.res.text(); } catch { /* drained or gone */ } second.stop(); return first; }
+  first.stop();
   if (urls[1] === endpointUrl(base, path)) versionlessBases.delete(base);
   else versionlessBases.add(base);
   return second;
 }
 
-/** A fetch, bounded by AbortController. Never throws for HTTP status; throws for transport. */
+/** A fetch, bounded by AbortController. Never throws for HTTP status; throws for transport.
+ * The `stop` it hands back disarms the timeout: a whole-body read calls it as soon as the
+ * headers are in, a streaming drain keeps it armed until the last byte — a stream that stalls
+ * mid-generation is exactly the hang the timeout exists to cut, and the job-level signal
+ * alone would not reach a body nobody is reading. */
 async function call(fetchImpl, url, init, timeoutMs, signal) {
   const ctl = new AbortController();
   const onOuter = () => ctl.abort();
@@ -87,17 +102,69 @@ async function call(fetchImpl, url, init, timeoutMs, signal) {
   // An abort that already landed (during a retry pause, say) must not let a fresh request leave.
   if (signal && signal.aborted) ctl.abort();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const stop = () => { clearTimeout(timer); if (signal) signal.removeEventListener('abort', onOuter); };
   try {
-    return await fetchImpl(url, { ...init, signal: ctl.signal });
-  } finally {
-    clearTimeout(timer);
-    if (signal) signal.removeEventListener('abort', onOuter);
+    const res = await fetchImpl(url, { ...init, signal: ctl.signal });
+    return { res, stop };
+  } catch (e) {
+    stop();
+    throw e;
   }
 }
 
 async function readJson(res) {
   const text = await res.text();
   try { return { data: JSON.parse(text), text }; } catch { return { data: null, text }; }
+}
+
+const isEventStream = res => {
+  try {
+    const ct = res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-type') || '' : '';
+    return /event-stream/i.test(ct);
+  } catch { return false; }
+};
+
+/** Drains an SSE body, handing each `data:` payload to the spec's `readDelta` and joining the
+ * text it yields. `[DONE]` ends the stream; a payload may also carry the finish reason or an
+ * error. Anything that does not parse (a comment, a keepalive) is skipped, not failed on. */
+async function readSSE(res, spec, stop) {
+  const out = { text: '', truncated: false, error: null };
+  const handle = payload => {
+    payload = String(payload).trim();
+    if (!payload) return false;
+    if (payload === '[DONE]') return true;
+    let data;
+    try { data = JSON.parse(payload); } catch { return false; }
+    const d = spec.readDelta(data) || {};
+    if (d.error) { out.error = String(d.error); return true; }
+    if (d.text) out.text += d.text;
+    if (d.truncated) out.truncated = true;
+    return false;
+  };
+  let reader = null;
+  try {
+    reader = res.body && typeof res.body.getReader === 'function' ? res.body.getReader() : null;
+    if (reader) {
+      const dec = new TextDecoder();
+      let buf = '', ended = false;
+      while (!ended) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const raw = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (raw.startsWith('data:') && handle(raw.slice(5))) { ended = true; break; }
+        }
+      }
+      if (!ended && buf.startsWith('data:')) handle(buf.slice(5));
+    }
+  } finally {
+    stop();
+    if (reader) { try { await reader.cancel(); } catch { /* already closed */ } }
+  }
+  return out;
 }
 
 export function httpAdapter(spec) {
@@ -137,13 +204,14 @@ export function httpAdapter(spec) {
       if (!base) return { ok: false, error: 'no endpoint configured', models: [] };
       const key = keyOf(env);
       if (!key && !meta.keyOptional) return { ok: false, error: 'no API key configured', models: [] };
-      let res;
+      let res, stop;
       try {
-        res = await reach(spec, base, spec.modelsPath, url => call(fetchImpl, url, { method: 'GET', headers: { ...extraHeadersFor(id, cfg), ...spec.headers(key) } }, timeoutMs, signal));
+        ({ res, stop } = await reach(spec, base, spec.modelsPath, url => call(fetchImpl, url, { method: 'GET', headers: { ...extraHeadersFor(id, cfg), ...spec.headers(key) } }, timeoutMs, signal)));
       } catch (e) {
         return { ok: false, error: e.name === 'AbortError' ? 'timed out' : `could not reach ${hostOf(base)}: ${trim(e.message, 120)}`, models: [] };
       }
       const { data, text } = await readJson(res);
+      stop();
       if (!res.ok) return { ok: false, error: `${res.status} ${trim(spec.errorMessage(data) || text, 200)}`, models: [] };
       let models;
       try { models = spec.readModels(data); } catch { models = null; }
@@ -165,22 +233,40 @@ export function httpAdapter(spec) {
       const chosen = model || meta.defaultModel;
       if (!chosen) return { code: 1, text: '', stderr: `no model chosen for ${id} (pick one from the list the endpoint serves)` };
 
-      let body = spec.body({ model: chosen, prompt, system: system || null, schema: schema || null, maxTokens });
+      const unstreamed = spec.body({ model: chosen, prompt, system: system || null, schema: schema || null, maxTokens });
+      // The spec's own body with `stream: true` — the deltas are joined back into the one
+      // `text` the parser always read, so nothing downstream knows a stream happened.
+      let body = spec.canStream ? { ...unstreamed, stream: true } : unstreamed;
       let retriedWithoutJsonMode = false;
+      let retriedWithoutStream = false;
       let transientRetries = 0;
       for (;;) {
-        let res;
+        let res, stop;
         try {
-          res = await reach(spec, base, spec.path(chosen), url => call(fetchImpl, url, {
+          ({ res, stop } = await reach(spec, base, spec.path(chosen), url => call(fetchImpl, url, {
             method: 'POST',
             headers: { ...extraHeadersFor(id, cfg), 'content-type': 'application/json', ...spec.headers(key) },
             body: JSON.stringify(body)
-          }, timeoutMs, signal));
+          }, timeoutMs, signal)));
         } catch (e) {
           if (e.name === 'AbortError') return { code: -1, text: '', stderr: 'timed out', timedOut: true };
           return { code: 1, text: '', stderr: `could not reach ${hostOf(base)}: ${trim(e.message, 200)}` };
         }
+        // A stream answers 2xx with an event body; a server that ignored the flag answers
+        // with a single JSON object and is read exactly as it always was.
+        if (res.ok && body.stream && isEventStream(res)) {
+          let out;
+          try { out = await readSSE(res, spec, stop); }
+          catch (e) {
+            if (e.name === 'AbortError') return { code: -1, text: '', stderr: 'timed out', timedOut: true };
+            return { code: 1, text: '', stderr: `the stream broke mid-answer: ${trim(e.message, 160)}` };
+          }
+          if (out.error) return { code: 1, text: '', stderr: trim(out.error, 280) };
+          if (out.truncated) return { code: 1, text: '', stderr: 'the answer was cut off at the output limit; try a smaller plan or a bigger model' };
+          return { code: 0, text: String(out.text || '').trim(), stderr: '' };
+        }
         const { data, text } = await readJson(res);
+        stop();
         if (!res.ok) {
           const msg = spec.errorMessage(data) || trim(text, 200);
           if (RETRY_STATUSES.has(res.status) && transientRetries < RETRY_DELAYS_MS.length && !(signal && signal.aborted)) {
@@ -192,6 +278,12 @@ export function httpAdapter(spec) {
           if (res.status === 400 && spec.withoutJsonMode && !retriedWithoutJsonMode && /response_format|json_schema|json_object|json mode|structured/i.test(msg)) {
             body = spec.withoutJsonMode(body);
             retriedWithoutJsonMode = true;
+            continue;
+          }
+          // And some cannot stream at all, and say so on the flag itself. Once, without it.
+          if (res.status === 400 && body.stream && !retriedWithoutStream && /stream/i.test(msg)) {
+            body = unstreamed;
+            retriedWithoutStream = true;
             continue;
           }
           return { code: 1, text: '', stderr: `${res.status} ${trim(msg, 280)}` };

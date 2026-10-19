@@ -1,5 +1,9 @@
 /* Google Gemini (Generative Language API). The key travels as a header, never as `?key=` —
- * a query string ends up in proxy logs, error messages and browser history. */
+ * a query string ends up in proxy logs, error messages and browser history.
+ *
+ * No `canStream` on purpose: Gemini's native streaming is a different endpoint
+ * (`:streamGenerateContent?alt=sse`), not a flag on generateContent, and the spec's path is
+ * per-model already — the transport in http.js streams only what a `stream: true` body buys. */
 import { httpAdapter } from './http.js';
 import { SYSTEM_PROMPT } from '../system-prompt.js';
 

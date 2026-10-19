@@ -36,6 +36,19 @@ export function chatCompletionsSpec(id, { maxTokensField = 'max_completion_token
     withoutJsonMode: body => (body.response_format && body.response_format.type === 'json_schema'
       ? { ...body, response_format: { type: 'json_object' } }
       : (() => { const { response_format: _rf, ...rest } = body; return rest; })()),
+    // Streamed answers (see http.js): each `data:` chunk carries a delta, the last one the
+    // finish reason. A chunk with no choices is a keepalive (OpenRouter sends them for usage
+    // accounting), not a failure.
+    canStream: true,
+    readDelta: data => {
+      const choice = (data.choices || [])[0];
+      if (!choice) return {};
+      const delta = choice.delta || {};
+      const content = typeof delta.content === 'string' ? delta.content
+        : Array.isArray(delta.content) ? delta.content.map(p => p.text || '').join('')
+        : '';
+      return { text: content, truncated: choice.finish_reason === 'length' };
+    },
     errorMessage: data => data && data.error && (typeof data.error === 'string' ? data.error : data.error.message),
     readText: data => {
       const choice = (data.choices || [])[0];

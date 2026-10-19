@@ -16,10 +16,12 @@ const gemini = (await import('../coach/core/adapters/gemini.js')).default;
 const compatible = (await import('../coach/core/adapters/compatible.js')).default;
 const { attemptOnce } = await import('../coach/core/pipeline.js');
 const { HTTP_PROVIDERS, validateBaseUrl, validateHeaders } = await import('../coach/core/providers.js');
+const { MAX_OUTPUT_TOKENS } = await import('../coach/core/adapters/http.js');
 const { SYSTEM_PROMPT } = await import('../coach/core/system-prompt.js');
 
 /** A fetch that records what it was asked and answers from a script. Like the real one, it
- *  refuses an already-aborted signal without putting anything on the wire. */
+ *  refuses an already-aborted signal without putting anything on the wire. An answer may
+ *  carry a `headers` map and a ReadableStream `body` — what a streamed response looks like. */
 function fakeFetch(answers) {
   const calls = [];
   const f = async (url, init) => {
@@ -27,11 +29,25 @@ function fakeFetch(answers) {
     calls.push({ url, method: init.method, headers: init.headers || {}, body: init.body ? JSON.parse(init.body) : null });
     const a = typeof answers === 'function' ? answers(calls.length, url, init) : answers[Math.min(calls.length, answers.length) - 1];
     if (a instanceof Error) throw a;
-    return { ok: a.status >= 200 && a.status < 300, status: a.status, text: async () => (typeof a.body === 'string' ? a.body : JSON.stringify(a.body)) };
+    const stream = a.body && typeof a.body.getReader === 'function' ? a.body : null;
+    return {
+      ok: a.status >= 200 && a.status < 300,
+      status: a.status,
+      headers: a.headers || { get: () => null },
+      body: stream,
+      text: async () => (stream ? '' : typeof a.body === 'string' ? a.body : JSON.stringify(a.body))
+    };
   };
   f.calls = calls;
   return f;
 }
+/** An SSE answer: each payload becomes one `data:` event, exactly the framing a streamed
+ *  chat completion arrives in. A string payload is a raw line ([DONE], a keepalive comment). */
+const sse = (payloads, { status = 200, contentType = 'text/event-stream' } = {}) => {
+  const enc = new TextEncoder();
+  const chunks = payloads.map(p => enc.encode(typeof p === 'string' ? p + '\n\n' : 'data: ' + JSON.stringify(p) + '\n\n'));
+  return { status, headers: new Map([['content-type', contentType]]), body: new ReadableStream({ start(c) { for (const q of chunks) c.enqueue(q); c.close(); } }) };
+};
 const ok = body => ({ status: 200, body });
 const env = { ANTHROPIC_API_KEY: 'sk-ant-1', OPENAI_API_KEY: 'sk-oa-1', GEMINI_API_KEY: 'AIza-1', OPENAI_COMPAT_API_KEY: 'compat-1' };
 const cfgCompat = { provider: 'compatible', providerOptions: { compatible: { baseUrl: 'http://ollama.lan:11434/' } } };
@@ -442,4 +458,138 @@ test('validateHeaders: small maps pass, framing names and junk do not', () => {
   assert.equal(validateHeaders([['a', 'b']]).ok, false);
   const many = {}; for (let i = 0; i < 9; i++) many['x-h-' + i] = 'v';
   assert.equal(validateHeaders(many).ok, false);
+});
+
+/* Streaming (see http.js): the request asks for it, the deltas are joined back into the one
+ * `text` the parser always read, and every way a stream can go wrong lands in the same
+ * { code, stderr, timedOut } contract the pipeline classifies. */
+
+test('streaming: SSE deltas are joined into one text, keepalives skipped, and the request asked to stream', async () => {
+  const f = fakeFetch([sse([
+    { choices: [{ delta: { role: 'assistant' } }] },                    // no content yet
+    { choices: [] },                                                    // a keepalive chunk (OpenRouter usage)
+    { choices: [{ delta: { content: '{"coach_contract":1,' } }] },
+    { choices: [{ delta: { content: '"nochange":true,"reading":"fine"}' } }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    '[DONE]'
+  ])]);
+  const r = await compatible.invoke({ cfg: cfgCompat, prompt: 'P', env: {}, model: 'llama3', fetch: f });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.text, ANSWER);
+  assert.equal(f.calls[0].body.stream, true, 'the request asks to stream');
+  assert.equal(f.calls[0].body.max_tokens, MAX_OUTPUT_TOKENS, 'the rest of the body is the spec\'s own');
+});
+
+test('streaming: a chunk split mid-line and CRLF line endings still parse', async () => {
+  // One enqueue holds half a JSON line; the next completes it. CRLF is legal SSE framing.
+  const enc = new TextEncoder();
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"{\\"coach'));
+      c.enqueue(enc.encode('_contract\\":1,\\"nochange\\":true,\\"reading\\":\\"fine\\"}"}}]}\r\n'));
+      c.enqueue(enc.encode('data: [DONE]\r\n\r\n'));
+      c.close();
+    }
+  });
+  const f = fakeFetch([{ status: 200, headers: new Map([['content-type', 'text/event-stream']]), body }]);
+  const r = await compatible.invoke({ cfg: cfgCompat, prompt: 'P', env: {}, model: 'm', fetch: f });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.text, ANSWER);
+});
+
+test('streaming: cut off at the output limit fails as "provider", not as a half-parsed proposal', async () => {
+  const f = fakeFetch([sse([
+    { choices: [{ delta: { content: '{"coach_contract":1,"changes":[' } }] },
+    { choices: [{ delta: {}, finish_reason: 'length' }] },
+    '[DONE]'
+  ])]);
+  const r = await compatible.invoke({ cfg: cfgCompat, prompt: 'P', env: {}, model: 'm', fetch: f });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /cut off/);
+  const cls = await attemptOnce({ adapter: compatible, cfg: cfgCompat, kind: 'review', payload: { plan: { routines: [], week: {} } }, model: 'm', invokeOpts: { env: {}, fetch: f } }, null);
+  assert.equal(cls.errorClass, 'provider');
+  assert.equal(cls.repairable, undefined, 'the repair round is not spent on a truncated answer');
+});
+
+test('streaming: a server that ignores the flag and answers one JSON body is still read', async () => {
+  const whole = ok({ choices: [{ message: { content: ANSWER }, finish_reason: 'stop' }] });
+  whole.headers = new Map([['content-type', 'application/json']]);
+  const f = fakeFetch([whole]);
+  const r = await compatible.invoke({ cfg: cfgCompat, prompt: 'P', env: {}, model: 'llama3', fetch: f });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.text, ANSWER);
+  assert.equal(f.calls[0].body.stream, true, 'the request still asked to stream');
+});
+
+test('streaming: a server that rejects the flag outright is asked once more without it', async () => {
+  const f = fakeFetch(n => (n === 1
+    ? { status: 400, body: { error: { message: 'stream is not supported by this backend' } } }
+    : ok({ choices: [{ message: { content: ANSWER }, finish_reason: 'stop' }] })));
+  const r = await compatible.invoke({ cfg: cfgCompat, prompt: 'P', env: {}, model: 'llama3', fetch: f });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls[0].body.stream, true);
+  assert.equal(f.calls[1].body.stream, undefined, 'the retry is the plain non-streaming request');
+});
+
+test('streaming: a stalled stream is cut by the timeout, not hung forever', async () => {
+  // A stream that never sends a byte: the adapter's own timeout must reach the body read —
+  // the job-level signal would not, nobody is reading it but us.
+  const f = fakeFetch((n, url, init) => ({
+    status: 200,
+    headers: new Map([['content-type', 'text/event-stream']]),
+    body: new ReadableStream({
+      start(c) { init.signal.addEventListener('abort', () => c.error(Object.assign(new Error('aborted'), { name: 'AbortError' }))); }
+    })
+  }));
+  const r = await compatible.invoke({ cfg: cfgCompat, prompt: 'P', env: {}, model: 'm', fetch: f, timeoutMs: 20 });
+  assert.equal(r.timedOut, true);
+  const cls = await attemptOnce({ adapter: compatible, cfg: cfgCompat, kind: 'review', payload: { plan: { routines: [], week: {} } }, model: 'm', timeoutMs: 20, invokeOpts: { env: {}, fetch: f } }, null);
+  assert.equal(cls.errorClass, 'timeout');
+});
+
+test('streaming: Anthropic\'s typed events — text deltas, bookkeeping, max_tokens and refusal', async () => {
+  const f = fakeFetch([sse([
+    { type: 'message_start', message: {} },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '{"coach_contract":1,' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '"nochange":true,"reading":"fine"}' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+    { type: 'message_stop' }
+  ])]);
+  const r = await anthropic.invoke({ cfg: {}, prompt: 'P', env, fetch: f });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.text, ANSWER);
+  assert.equal(f.calls[0].body.stream, true);
+
+  const cut = fakeFetch([sse([
+    { type: 'content_block_delta', delta: { type: 'text_delta', text: '{"coach_contract":1,' } },
+    { type: 'message_delta', delta: { stop_reason: 'max_tokens' } }
+  ])]);
+  const rc = await anthropic.invoke({ cfg: {}, prompt: 'P', env, fetch: cut });
+  assert.equal(rc.code, 1);
+  assert.match(rc.stderr, /cut off/);
+
+  const refused = fakeFetch([sse([
+    { type: 'message_delta', delta: { stop_reason: 'refusal' } }
+  ])]);
+  const rr = await anthropic.invoke({ cfg: {}, prompt: 'P', env, fetch: refused });
+  assert.equal(rr.code, 1);
+  assert.match(rr.stderr, /declined/);
+
+  const broke = fakeFetch([sse([
+    { type: 'error', error: { message: 'overloaded_error' } }
+  ])]);
+  const rb = await anthropic.invoke({ cfg: {}, prompt: 'P', env, fetch: broke });
+  assert.equal(rb.code, 1);
+  assert.match(rb.stderr, /overloaded_error/);
+});
+
+test('streaming: Gemini does not stream — its native endpoint is not SSE, and the body says nothing about it', async () => {
+  const f = fakeFetch([ok({ candidates: [{ content: { parts: [{ text: ANSWER }] }, finishReason: 'STOP' }] })]);
+  const r = await gemini.invoke({ cfg: {}, prompt: 'P', env, model: 'gemini-z', fetch: f });
+  assert.equal(r.code, 0);
+  assert.equal(f.calls[0].body.stream, undefined);
+  assert.equal(f.calls[0].url.includes('streamGenerateContent'), false);
 });
