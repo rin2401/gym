@@ -99,6 +99,60 @@ export function extraHeadersFor(id, cfg) {
   return out;
 }
 
+/* Extra request-body parameters a gateway exposes under its own name — `reasoning_effort`,
+ * `thinking_budget`, `enable_thinking` and the like. Stored plaintext next to baseUrl, same
+ * reasoning as headers: these are behaviour hints, not credentials. The keys the adapter
+ * itself sets are reserved outright, and a stored map from before a key was reserved is
+ * filtered again at send time, so a body parameter can never move the model, the messages,
+ * the stream flag or the output ceiling. */
+export const MAX_BODY_PARAMS = 16;
+export const MAX_BODY_PARAM_STRING = 500;
+const BODY_KEY = /^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$/;
+const RESERVED_BODY_KEYS = new Set([
+  'model', 'messages', 'system', 'prompt', 'stream', 'stream_options',
+  'response_format', 'max_tokens', 'max_completion_tokens', 'tools', 'tool_choice', 'input'
+]);
+export const isReservedBodyKey = name => RESERVED_BODY_KEYS.has(String(name || '').toLowerCase());
+
+export function validateBodyParams(raw) {
+  if (raw == null || raw === '') return { ok: true, value: null };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'bodyParams must be an object of name to value' };
+  const names = Object.keys(raw);
+  if (names.length > MAX_BODY_PARAMS) return { ok: false, error: `at most ${MAX_BODY_PARAMS} body parameters` };
+  const out = {};
+  for (const name of names) {
+    if (!BODY_KEY.test(name)) return { ok: false, error: `bad body parameter name: ${name}` };
+    if (isReservedBodyKey(name)) return { ok: false, error: `body parameter is reserved: ${name}` };
+    const v = raw[name];
+    if (v === null) { out[name] = null; continue; }
+    if (typeof v === 'string') {
+      if (!v.trim() || v.length > MAX_BODY_PARAM_STRING) return { ok: false, error: `body parameter ${name} has a bad value` };
+      out[name] = v;
+    } else if (typeof v === 'number') {
+      if (!Number.isFinite(v)) return { ok: false, error: `body parameter ${name} has a bad value` };
+      out[name] = v;
+    } else if (typeof v === 'boolean') {
+      out[name] = v;
+    } else {
+      return { ok: false, error: `body parameter ${name} must be a string, number or boolean` };
+    }
+  }
+  return { ok: true, value: Object.keys(out).length ? out : null };
+}
+
+/** The extra body parameters a provider call carries: the configured map minus anything
+ *  reserved, re-checked at send time for the same reason the headers are. */
+export function extraBodyFor(id, cfg) {
+  const set = cfg && cfg.providerOptions && cfg.providerOptions[id] && cfg.providerOptions[id].bodyParams;
+  if (!set || typeof set !== 'object' || Array.isArray(set)) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(set)) {
+    if (isReservedBodyKey(k)) continue;
+    if (v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') out[k] = v;
+  }
+  return out;
+}
+
 /**
  * Only http(s), only a parseable URL, and never credentials in it — a base URL is admin
  * configuration, but "admin-configured" and "safe to log" are different properties, and the

@@ -15,7 +15,7 @@ const openai = (await import('../coach/core/adapters/openai.js')).default;
 const gemini = (await import('../coach/core/adapters/gemini.js')).default;
 const compatible = (await import('../coach/core/adapters/compatible.js')).default;
 const { attemptOnce } = await import('../coach/core/pipeline.js');
-const { HTTP_PROVIDERS, validateBaseUrl, validateHeaders } = await import('../coach/core/providers.js');
+const { HTTP_PROVIDERS, validateBaseUrl, validateHeaders, validateBodyParams } = await import('../coach/core/providers.js');
 const { MAX_OUTPUT_TOKENS } = await import('../coach/core/adapters/http.js');
 const { SYSTEM_PROMPT } = await import('../coach/core/system-prompt.js');
 
@@ -592,4 +592,39 @@ test('streaming: Gemini does not stream — its native endpoint is not SSE, and 
   assert.equal(r.code, 0);
   assert.equal(f.calls[0].body.stream, undefined);
   assert.equal(f.calls[0].url.includes('streamGenerateContent'), false);
+});
+
+test('compatible: configured body params ride on the request — framing keys cannot be overridden', async () => {
+  const cfg = { provider: 'compatible', providerOptions: { compatible: { baseUrl: 'http://ollama.lan:11434', bodyParams: { reasoning_effort: 'low', thinking_budget: 128, enable_thinking: false } } } };
+  const f = fakeFetch([ok({ choices: [{ message: { content: ANSWER }, finish_reason: 'stop' }] })]);
+  await compatible.invoke({ cfg, prompt: 'P', env: {}, model: 'llama3', fetch: f });
+  assert.equal(f.calls[0].body.reasoning_effort, 'low');
+  assert.equal(f.calls[0].body.thinking_budget, 128);
+  assert.equal(f.calls[0].body.enable_thinking, false);
+  assert.equal(f.calls[0].body.model, 'llama3');
+  assert.equal(f.calls[0].body.stream, true, 'the stream flag is still the adapter\'s');
+
+  // A stored map from before a key was reserved must not move the framing at send time.
+  const evil = { provider: 'compatible', providerOptions: { compatible: { baseUrl: 'http://x', bodyParams: { model: 'evil', messages: [], stream: false, response_format: { type: 'text' } } } } };
+  const e = fakeFetch([ok({ choices: [{ message: { content: ANSWER }, finish_reason: 'stop' }] })]);
+  await compatible.invoke({ cfg: evil, prompt: 'P', env: {}, model: 'llama3', fetch: e });
+  assert.equal(e.calls[0].body.model, 'llama3');
+  assert.equal(e.calls[0].body.stream, true);
+  assert.equal(e.calls[0].body.response_format.type, 'json_object');
+});
+
+test('validateBodyParams: primitives pass, framing names and junk do not', () => {
+  assert.deepEqual(validateBodyParams(null).value, null);
+  assert.deepEqual(validateBodyParams({}), { ok: true, value: null });
+  assert.deepEqual(validateBodyParams({ reasoning_effort: 'low', thinking_budget: 128, enable_thinking: false }).value,
+    { reasoning_effort: 'low', thinking_budget: 128, enable_thinking: false });
+  for (const bad of ['model', 'messages', 'stream', 'response_format', 'max_tokens']) {
+    assert.equal(validateBodyParams({ [bad]: 'x' }).ok, false, bad);
+  }
+  assert.equal(validateBodyParams({ 'not a key!': 1 }).ok, false);
+  assert.equal(validateBodyParams({ a: { nested: true } }).ok, false);
+  assert.equal(validateBodyParams([['a', 'b']]).ok, false);
+  assert.equal(validateBodyParams({ a: Infinity }).ok, false);
+  const many = {}; for (let i = 0; i < 17; i++) many['k' + i] = i;
+  assert.equal(validateBodyParams(many).ok, false);
 });

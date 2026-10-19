@@ -27,7 +27,7 @@
  *
  * A provider is described by a spec (see anthropic.js etc.); this file owns the transport.
  */
-import { HTTP_PROVIDERS, baseUrlFor, extraHeadersFor } from '../providers.js';
+import { HTTP_PROVIDERS, baseUrlFor, extraHeadersFor, extraBodyFor } from '../providers.js';
 
 export const MAX_OUTPUT_TOKENS = 16000;
 const DEFAULT_TIMEOUT_MS = 5 * 60000;
@@ -233,7 +233,10 @@ export function httpAdapter(spec) {
       const chosen = model || meta.defaultModel;
       if (!chosen) return { code: 1, text: '', stderr: `no model chosen for ${id} (pick one from the list the endpoint serves)` };
 
-      const unstreamed = spec.body({ model: chosen, prompt, system: system || null, schema: schema || null, maxTokens });
+      // The spec's own body, plus any behaviour hint the admin stored for this gateway
+      // (`reasoning_effort`, `thinking_budget`, `enable_thinking`…) — framing keys are
+      // reserved and cannot be moved by it (see providers.js).
+      const unstreamed = { ...spec.body({ model: chosen, prompt, system: system || null, schema: schema || null, maxTokens }), ...extraBodyFor(id, cfg) };
       // The spec's own body with `stream: true` — the deltas are joined back into the one
       // `text` the parser always read, so nothing downstream knows a stream happened.
       let body = spec.canStream ? { ...unstreamed, stream: true } : unstreamed;

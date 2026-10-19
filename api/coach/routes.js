@@ -10,7 +10,7 @@ import { computeCohort } from './cohort.js';
 import { adapterFor } from './adapters/index.js';
 import { canDropPrivileges } from './adapters/spawn.js';
 import { DATA_CATEGORIES } from './core/payload.js';
-import { validateBaseUrl, validateHeaders, baseUrlFor } from './core/providers.js';
+import { validateBaseUrl, validateHeaders, validateBodyParams, baseUrlFor } from './core/providers.js';
 
 // Job failures the user sees, in the app's own voice. The raw provider detail never reaches
 // them — it goes to the admin card, which is where someone can act on it (FR-47).
@@ -169,6 +169,9 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
         // Values, not just names: the admin wrote them and needs to see them to edit them.
         // Plaintext next to baseUrl — routing aids, not credentials (the key stays encrypted).
         headers: cfgStore.providerMeta(cfg).http ? (cfgStore.optionsFor(cfg).headers || null) : null,
+        // Behaviour hints the gateway reads from the request body (`reasoning_effort`,
+        // `thinking_budget`, `enable_thinking`…) — plaintext like the headers, framing keys reserved.
+        bodyParams: cfgStore.providerMeta(cfg).http ? (cfgStore.optionsFor(cfg).bodyParams || null) : null,
         knownModels: check.models || null,
         caps: cfg.caps,
         maxMessageLen: cfg.maxMessageLen,
@@ -239,6 +242,16 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
         // Build on the patch, not on current: a body carrying baseUrl AND headers must keep both.
         const next = { ...((patch.providerOptions && patch.providerOptions[target]) || current.providerOptions[target] || {}) };
         if (h.value) next.headers = h.value; else delete next.headers;
+        patch.providerOptions = { ...current.providerOptions, ...(patch.providerOptions || {}), [target]: next };
+      }
+      if (body.bodyParams !== undefined) {
+        if (!cfgStore.PROVIDERS[target].baseUrl) return json(res, 400, { error: `${target} has a fixed endpoint` });
+        const p = validateBodyParams(body.bodyParams);
+        if (!p.ok) return json(res, 400, { error: p.error });
+        // Same patch-building rule as headers: baseUrl, headers and bodyParams in one request
+        // must all survive.
+        const next = { ...((patch.providerOptions && patch.providerOptions[target]) || current.providerOptions[target] || {}) };
+        if (p.value) next.bodyParams = p.value; else delete next.bodyParams;
         patch.providerOptions = { ...current.providerOptions, ...(patch.providerOptions || {}), [target]: next };
       }
       if (body.community !== undefined) patch.community = !!body.community;
